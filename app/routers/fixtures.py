@@ -1,0 +1,94 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+import asyncpg
+
+from app.core.dependencies import require_super_admin
+from app.core.exceptions import NotFoundError
+from app.core.pagination import PaginationParams, get_pagination
+from app.database.pool import get_conn
+from app.queries import fixtures as q
+from app.queries import tournaments as tq
+from app.schemas.fixtures import FixtureCreate, FixtureOut, FixtureUpdate
+from app.schemas.pagination import Paginated, paginated
+
+router = APIRouter(prefix="/fixtures", tags=["fixtures"])
+
+
+@router.get("", response_model=Paginated[FixtureOut])
+async def list_fixtures(
+    tournament_id: str | None = Query(None),
+    status: str | None = Query(None),
+    round: str | None = Query(None),
+    date: str | None = Query(None),
+    club_id: str | None = Query(None),
+    pagination: PaginationParams = Depends(get_pagination),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    items, total = await q.get_fixtures(
+        conn,
+        tournament_id=tournament_id,
+        status=status,
+        round=round,
+        date=date,
+        club_id=club_id,
+        limit=pagination.limit,
+        offset=pagination.offset,
+    )
+    return paginated(items, total, pagination.limit, pagination.offset)
+
+
+@router.get("/live", response_model=Paginated[FixtureOut])
+async def list_live_fixtures(
+    pagination: PaginationParams = Depends(get_pagination),
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    items, total = await q.get_live_fixtures(
+        conn, limit=pagination.limit, offset=pagination.offset
+    )
+    return paginated(items, total, pagination.limit, pagination.offset)
+
+
+@router.get("/{fixture_id}", response_model=FixtureOut)
+async def get_fixture(fixture_id: str, conn: asyncpg.Connection = Depends(get_conn)):
+    fixture = await q.get_fixture_by_id(conn, fixture_id)
+    if not fixture:
+        raise NotFoundError("Fixture")
+    return fixture
+
+
+@router.post("", response_model=FixtureOut, status_code=201)
+async def create_fixture(
+    payload: FixtureCreate,
+    conn: asyncpg.Connection = Depends(get_conn),
+    _: dict = Depends(require_super_admin),
+):
+    data = payload.model_dump()
+    if not data.get("tournament_id"):
+        current = await tq.get_current_tournament(conn)
+        if not current:
+            raise HTTPException(status_code=400, detail="No active tournament found. Create or mark a tournament as current first.")
+        data["tournament_id"] = current["id"]
+    return await q.create_fixture(conn, data)
+
+
+@router.patch("/{fixture_id}", response_model=FixtureOut)
+async def update_fixture(
+    fixture_id: str,
+    payload: FixtureUpdate,
+    conn: asyncpg.Connection = Depends(get_conn),
+    _: dict = Depends(require_super_admin),
+):
+    fixture = await q.update_fixture(conn, fixture_id, payload.model_dump(exclude_none=True))
+    if not fixture:
+        raise NotFoundError("Fixture")
+    return fixture
+
+
+@router.delete("/{fixture_id}", status_code=204)
+async def delete_fixture(
+    fixture_id: str,
+    conn: asyncpg.Connection = Depends(get_conn),
+    _: dict = Depends(require_super_admin),
+):
+    deleted = await q.delete_fixture(conn, fixture_id)
+    if not deleted:
+        raise NotFoundError("Fixture")
