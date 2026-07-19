@@ -13,13 +13,37 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS users (
     id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     email         VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255),          -- null until invite accepted
     full_name     VARCHAR(255) NOT NULL,
-    role          VARCHAR(20)  NOT NULL CHECK (role IN ('super_admin', 'club_manager')),
+    role          VARCHAR(20)  NOT NULL CHECK (role IN ('super_admin', 'platform_admin', 'club_manager')),
     is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+
+-- =============================================================================
+-- INVITES  (pending staff invitations)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS invites (
+    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    email       VARCHAR(255) NOT NULL,
+    full_name   VARCHAR(255) NOT NULL,
+    role        VARCHAR(20)  NOT NULL
+                    CHECK (role IN ('super_admin', 'platform_admin', 'club_manager')),
+    club_ids    UUID[]       NOT NULL DEFAULT '{}',
+    token_hash  VARCHAR(64)  NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ  NOT NULL,
+    invited_by  UUID         REFERENCES users(id) ON DELETE SET NULL,
+    accepted_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_invites_email ON invites (email);
+CREATE INDEX IF NOT EXISTS idx_invites_pending
+    ON invites (accepted_at)
+    WHERE accepted_at IS NULL;
 
 
 -- =============================================================================

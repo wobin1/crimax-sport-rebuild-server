@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database.pool import close_pool, init_pool
-from app.routers import auth, clubs, events, fixtures, lineups, live, media, news, players, standings, tournaments
+from app.routers import auth, clubs, events, fixtures, lineups, live, media, news, players, standings, tournaments, users
 
 
 @asynccontextmanager
@@ -33,6 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(users.router)
 app.include_router(clubs.router)
 app.include_router(players.router)
 app.include_router(tournaments.router)

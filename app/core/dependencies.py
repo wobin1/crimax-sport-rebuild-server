@@ -4,10 +4,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import asyncpg
 
 from app.core.auth import decode_access_token
-from app.core.exceptions import ForbiddenError, NotFoundError, UnauthorizedError
+from app.core.exceptions import ForbiddenError, UnauthorizedError
 from app.database.pool import get_conn
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+PLATFORM_OPS_ROLES = frozenset({"super_admin", "platform_admin"})
+STAFF_ROLES = frozenset({"super_admin", "platform_admin", "club_manager"})
+USER_MANAGER_ROLES = frozenset({"super_admin", "platform_admin"})
 
 
 # ── Current user ──────────────────────────────────────────────────────────────
@@ -35,7 +39,25 @@ async def get_current_user(
 async def require_super_admin(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    """Platform operators: super_admin and platform_admin (same operational powers)."""
+    if current_user["role"] not in PLATFORM_OPS_ROLES:
+        raise ForbiddenError()
+    return current_user
+
+
+async def require_super_admin_only(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
     if current_user["role"] != "super_admin":
+        raise ForbiddenError()
+    return current_user
+
+
+async def require_user_manager(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Anyone who can invite / manage staff accounts."""
+    if current_user["role"] not in USER_MANAGER_ROLES:
         raise ForbiddenError()
     return current_user
 
@@ -43,10 +65,22 @@ async def require_super_admin(
 async def require_admin(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Allows both super_admin and club_manager."""
-    if current_user["role"] not in ("super_admin", "club_manager"):
+    """Any authenticated staff member."""
+    if current_user["role"] not in STAFF_ROLES:
         raise ForbiddenError()
     return current_user
+
+
+def can_assign_role(actor_role: str, target_role: str) -> bool:
+    if actor_role == "super_admin":
+        return target_role in STAFF_ROLES
+    if actor_role == "platform_admin":
+        return target_role == "club_manager"
+    return False
+
+
+def can_manage_target(actor: dict, target_role: str) -> bool:
+    return can_assign_role(actor["role"], target_role)
 
 
 # ── Club access guard ─────────────────────────────────────────────────────────
@@ -56,7 +90,7 @@ async def get_managed_club_ids(
     conn: asyncpg.Connection,
 ) -> list[str]:
     """Returns list of club UUIDs the current user may manage."""
-    if current_user["role"] == "super_admin":
+    if current_user["role"] in PLATFORM_OPS_ROLES:
         rows = await conn.fetch("SELECT id FROM clubs")
         return [str(r["id"]) for r in rows]
     rows = await conn.fetch(
@@ -72,7 +106,7 @@ async def assert_club_access(
     conn: asyncpg.Connection,
 ) -> None:
     """Raises ForbiddenError if user cannot manage the given club."""
-    if current_user["role"] == "super_admin":
+    if current_user["role"] in PLATFORM_OPS_ROLES:
         return
     row = await conn.fetchrow(
         "SELECT 1 FROM club_managers WHERE user_id = $1 AND club_id = $2",
