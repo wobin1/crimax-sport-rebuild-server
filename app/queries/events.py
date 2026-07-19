@@ -24,7 +24,7 @@ async def get_fixture_events(
             p.full_name   AS player_name,
             e.club_id::text,
             c.name        AS club_name,
-            e.event_type,
+            e.event_type::text AS event_type,
             e.minute,
             e.extra_time_minute,
             e.description,
@@ -46,11 +46,27 @@ async def get_fixture_events(
 async def create_event(conn: asyncpg.Connection, data: dict) -> dict:
     row = await conn.fetchrow(
         """
-        INSERT INTO match_events
-            (fixture_id, player_id, club_id, event_type, minute, extra_time_minute, description)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id::text, fixture_id::text, player_id::text, club_id::text,
-                  event_type, minute, extra_time_minute, description, created_at::text
+        WITH inserted AS (
+            INSERT INTO match_events
+                (fixture_id, player_id, club_id, event_type, minute, extra_time_minute, description)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING *
+        )
+        SELECT
+            e.id::text,
+            e.fixture_id::text,
+            e.player_id::text,
+            p.full_name AS player_name,
+            e.club_id::text,
+            c.name      AS club_name,
+            e.event_type::text AS event_type,
+            e.minute,
+            e.extra_time_minute,
+            e.description,
+            e.created_at::text
+        FROM inserted e
+        LEFT JOIN players p ON p.id = e.player_id
+        LEFT JOIN clubs   c ON c.id = e.club_id
         """,
         data["fixture_id"],
         data.get("player_id"),

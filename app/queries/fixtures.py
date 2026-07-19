@@ -1,6 +1,14 @@
 import asyncpg
-from datetime import date as _Date, time as _Time
+from datetime import date as _Date, time as _Time, datetime, timezone
 from typing import Optional
+
+from app.core.match_clock import (
+    PERIOD_FIRST_HALF,
+    PERIOD_FULL_TIME,
+    PERIOD_HALF_TIME,
+    PERIOD_SECOND_HALF,
+    enrich_clock_fields,
+)
 
 
 def _parse_date(v: Optional[str]) -> Optional[_Date]:
@@ -9,6 +17,16 @@ def _parse_date(v: Optional[str]) -> Optional[_Date]:
 
 def _parse_time(v: Optional[str]) -> Optional[_Time]:
     return _Time.fromisoformat(v) if v else None
+
+
+def _iso(v) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.isoformat()
+    return str(v)
 
 
 _FIXTURE_SELECT = """
@@ -31,6 +49,10 @@ _FIXTURE_SELECT = """
         f.status,
         f.home_score,
         f.away_score,
+        f.period,
+        f.period_started_at,
+        f.period_base_minute,
+        f.stoppage_minutes,
         f.created_at::text,
         f.updated_at::text
     FROM fixtures f
@@ -40,9 +62,9 @@ _FIXTURE_SELECT = """
 """
 
 
-def _build_fixture_out(row: asyncpg.Record) -> dict:
+def _build_fixture_out(row: asyncpg.Record, scorers: Optional[dict] = None) -> dict:
     r = dict(row)
-    return {
+    out = {
         "id": r["id"],
         "tournament_id": r["tournament_id"],
         "tournament_name": r["tournament_name"],
@@ -65,9 +87,80 @@ def _build_fixture_out(row: asyncpg.Record) -> dict:
         "status": r["status"],
         "home_score": r["home_score"],
         "away_score": r["away_score"],
+        "period": r.get("period"),
+        "period_started_at": _iso(r.get("period_started_at")),
+        "period_base_minute": int(r.get("period_base_minute") or 0),
+        "stoppage_minutes": r.get("stoppage_minutes"),
+        "goal_scorers": scorers or {"home": [], "away": []},
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
     }
+    return enrich_clock_fields(out)
+
+
+async def _goal_scorers_for_fixtures(
+    conn: asyncpg.Connection, fixture_ids: list[str]
+) -> dict[str, dict]:
+    """Map fixture_id → { home: [...], away: [...] } goal scorer rows."""
+    empty: dict[str, dict] = {fid: {"home": [], "away": []} for fid in fixture_ids}
+    if not fixture_ids:
+        return empty
+
+    rows = await conn.fetch(
+        """
+        SELECT
+            e.fixture_id::text,
+            f.home_club_id::text AS home_club_id,
+            f.away_club_id::text AS away_club_id,
+            e.club_id::text AS club_id,
+            e.event_type,
+            e.minute,
+            e.extra_time_minute,
+            p.full_name AS player_name
+        FROM match_events e
+        JOIN fixtures f ON f.id = e.fixture_id
+        LEFT JOIN players p ON p.id = e.player_id
+        WHERE e.fixture_id = ANY($1::uuid[])
+          AND e.event_type IN ('goal', 'penalty_scored', 'own_goal')
+        ORDER BY e.minute, e.extra_time_minute NULLS FIRST, e.created_at
+        """,
+        fixture_ids,
+    )
+
+    for row in rows:
+        fid = row["fixture_id"]
+        bucket = empty.setdefault(fid, {"home": [], "away": []})
+        is_og = row["event_type"] == "own_goal"
+        # Own goals credit the opposing side on the board.
+        if is_og:
+            credited = (
+                row["away_club_id"]
+                if row["club_id"] == row["home_club_id"]
+                else row["home_club_id"]
+            )
+        else:
+            credited = row["club_id"]
+
+        side = "home" if credited == row["home_club_id"] else "away"
+        bucket[side].append(
+            {
+                "player_name": row["player_name"],
+                "minute": row["minute"],
+                "extra_time_minute": row["extra_time_minute"],
+                "is_own_goal": is_og,
+                "club_id": credited,
+            }
+        )
+    return empty
+
+
+async def _attach_scorers(conn: asyncpg.Connection, fixtures: list[dict]) -> list[dict]:
+    if not fixtures:
+        return fixtures
+    scorers_map = await _goal_scorers_for_fixtures(conn, [f["id"] for f in fixtures])
+    for f in fixtures:
+        f["goal_scorers"] = scorers_map.get(f["id"], {"home": [], "away": []})
+    return fixtures
 
 
 def _fixture_filters(
@@ -123,7 +216,9 @@ async def get_fixtures(
         f"LIMIT ${len(params) - 1} OFFSET ${len(params)}",
         *params,
     )
-    return [_build_fixture_out(r) for r in rows], int(total or 0)
+    fixtures = [_build_fixture_out(r) for r in rows]
+    await _attach_scorers(conn, fixtures)
+    return fixtures, int(total or 0)
 
 
 async def get_fixture_by_id(conn: asyncpg.Connection, fixture_id: str) -> Optional[dict]:
@@ -131,7 +226,11 @@ async def get_fixture_by_id(conn: asyncpg.Connection, fixture_id: str) -> Option
         f"{_FIXTURE_SELECT} WHERE f.id = $1",
         fixture_id,
     )
-    return _build_fixture_out(row) if row else None
+    if not row:
+        return None
+    fixture = _build_fixture_out(row)
+    await _attach_scorers(conn, [fixture])
+    return fixture
 
 
 async def get_live_fixtures(
@@ -148,7 +247,9 @@ async def get_live_fixtures(
         limit,
         offset,
     )
-    return [_build_fixture_out(r) for r in rows], int(total or 0)
+    fixtures = [_build_fixture_out(r) for r in rows]
+    await _attach_scorers(conn, fixtures)
+    return fixtures, int(total or 0)
 
 
 async def create_fixture(conn: asyncpg.Connection, data: dict) -> dict:
@@ -176,15 +277,104 @@ async def update_fixture(conn: asyncpg.Connection, fixture_id: str, data: dict) 
     if not fields:
         return await get_fixture_by_id(conn, fixture_id)
 
-    set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields))
-    values = [
-        _parse_date(v) if k == "match_date" else
-        _parse_time(v) if k == "match_time" else v
-        for k, v in fields.items()
-    ]
+    # Status → completed also seals full time on the clock (FT auto-set).
+    null_fields: dict = {}
+    if fields.get("status") == "completed":
+        fields.setdefault("period", PERIOD_FULL_TIME)
+        null_fields["period_started_at"] = None
+        null_fields["stoppage_minutes"] = None
+
+    set_parts: list[str] = []
+    values: list = []
+    for k, v in {**fields, **null_fields}.items():
+        values.append(
+            _parse_date(v) if k == "match_date" else
+            _parse_time(v) if k == "match_time" else v
+        )
+        set_parts.append(f"{k} = ${len(values) + 1}")
 
     await conn.execute(
-        f"UPDATE fixtures SET {set_clauses} WHERE id = $1",
+        f"UPDATE fixtures SET {', '.join(set_parts)}, updated_at = NOW() WHERE id = $1",
+        fixture_id,
+        *values,
+    )
+    return await get_fixture_by_id(conn, fixture_id)
+
+
+async def apply_clock_action(
+    conn: asyncpg.Connection,
+    fixture_id: str,
+    action: str,
+    minute: Optional[int] = None,
+    stoppage_minutes: Optional[int] = None,
+) -> Optional[dict]:
+    """Apply admin match-clock actions. Returns updated fixture or None."""
+    existing = await get_fixture_by_id(conn, fixture_id)
+    if not existing:
+        return None
+
+    now = datetime.now(timezone.utc)
+    updates: dict = {}
+
+    if action == "start_1h":
+        updates = {
+            "status": "live",
+            "period": PERIOD_FIRST_HALF,
+            "period_started_at": now,
+            "period_base_minute": 0,
+            "stoppage_minutes": None,
+        }
+    elif action == "ht":
+        updates = {
+            "status": "live",
+            "period": PERIOD_HALF_TIME,
+            "period_started_at": None,
+            "stoppage_minutes": None,
+        }
+    elif action == "start_2h":
+        updates = {
+            "status": "live",
+            "period": PERIOD_SECOND_HALF,
+            "period_started_at": now,
+            "period_base_minute": 45,
+            "stoppage_minutes": None,
+        }
+    elif action == "ft":
+        updates = {
+            "status": "completed",
+            "period": PERIOD_FULL_TIME,
+            "period_started_at": None,
+            "stoppage_minutes": None,
+        }
+    elif action == "nudge":
+        if minute is None:
+            raise ValueError("minute is required for nudge")
+        period = existing.get("period")
+        if period not in (PERIOD_FIRST_HALF, PERIOD_SECOND_HALF):
+            raise ValueError("Can only nudge the clock during a live half")
+        updates = {
+            "period_base_minute": minute,
+            "period_started_at": now,
+        }
+    elif action == "set_stoppage":
+        if stoppage_minutes is None:
+            raise ValueError("stoppage_minutes is required")
+        period = existing.get("period")
+        if period not in (PERIOD_FIRST_HALF, PERIOD_SECOND_HALF):
+            raise ValueError("Stoppage can only be set during a live half")
+        updates = {"stoppage_minutes": stoppage_minutes}
+    else:
+        raise ValueError(f"Unknown clock action: {action}")
+
+    # Build UPDATE that can set NULL
+    set_parts: list[str] = []
+    values: list = []
+    for k, v in updates.items():
+        values.append(v)
+        set_parts.append(f"{k} = ${len(values) + 1}")
+
+    await conn.execute(
+        f"UPDATE fixtures SET {', '.join(set_parts)}, updated_at = NOW() WHERE id = $1",
         fixture_id,
         *values,
     )

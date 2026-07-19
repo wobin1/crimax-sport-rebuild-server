@@ -43,16 +43,22 @@ async def create_event(
 
     await assert_club_access(payload.club_id, current_user, conn)
 
-    event = await q.create_event(conn, payload.model_dump())
+    # First event kicks the match live so public /live surfaces pick it up.
+    if fixture["status"] == "scheduled":
+        await fq.update_fixture(conn, payload.fixture_id, {"status": "live"})
 
+    event = await q.create_event(conn, payload.model_dump(mode="json"))
     home_score, away_score = await q.recalculate_score(conn, payload.fixture_id)
+    updated = await fq.get_fixture_by_id(conn, payload.fixture_id)
 
     await manager.broadcast(
-        payload.fixture_id,
+        str(payload.fixture_id),
         {
             "type": "event",
             "event": event,
             "score": {"home": home_score, "away": away_score},
+            "status": "live",
+            "fixture": updated,
         },
     )
 
@@ -66,7 +72,7 @@ async def delete_event(
     current_user: dict = Depends(get_current_user),
 ):
     event = await conn.fetchrow(
-        "SELECT id, fixture_id, club_id::text FROM match_events WHERE id = $1",
+        "SELECT id, fixture_id::text AS fixture_id, club_id::text FROM match_events WHERE id = $1",
         event_id,
     )
     if not event:
@@ -76,7 +82,12 @@ async def delete_event(
     await q.delete_event(conn, event_id)
 
     home_score, away_score = await q.recalculate_score(conn, event["fixture_id"])
+    updated = await fq.get_fixture_by_id(conn, event["fixture_id"])
     await manager.broadcast(
         str(event["fixture_id"]),
-        {"type": "score_update", "score": {"home": home_score, "away": away_score}},
+        {
+            "type": "score_update",
+            "score": {"home": home_score, "away": away_score},
+            "fixture": updated,
+        },
     )

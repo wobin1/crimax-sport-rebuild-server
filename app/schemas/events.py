@@ -27,12 +27,12 @@ class EventCreate(BaseModel):
 class EventOut(BaseModel):
     id: str
     fixture_id: str
-    player_id: Optional[str]
-    player_name: Optional[str]
-    club_id: Optional[str]
-    club_name: Optional[str]
+    player_id: Optional[str] = None
+    player_name: Optional[str] = None
+    club_id: Optional[str] = None
+    club_name: Optional[str] = None
     event_type: str
     minute: int
-    extra_time_minute: Optional[int]
-    description: Optional[str]
+    extra_time_minute: Optional[int] = None
+    description: Optional[str] = None
     created_at: str

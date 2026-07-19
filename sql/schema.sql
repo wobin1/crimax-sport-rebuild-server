@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS fixtures (
                   CHECK (status IN ('scheduled', 'live', 'completed', 'postponed', 'cancelled')),
     home_score    SMALLINT     NOT NULL DEFAULT 0,
     away_score    SMALLINT     NOT NULL DEFAULT 0,
+    -- Match clock (international period model)
+    period              VARCHAR(20)
+                        CHECK (period IS NULL OR period IN (
+                            'first_half', 'half_time', 'second_half', 'full_time'
+                        )),
+    period_started_at   TIMESTAMPTZ,
+    period_base_minute  SMALLINT     NOT NULL DEFAULT 0,
+    stoppage_minutes    SMALLINT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     CONSTRAINT no_self_match CHECK (home_club_id != away_club_id)
