@@ -1,5 +1,6 @@
 import json
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
@@ -11,10 +12,20 @@ def _json_default(obj: Any) -> Any:
     return str(obj)
 
 
+def stamp_payload(payload: dict) -> dict:
+    """Attach transport metadata used by viewers for staleness checks."""
+    stamped = dict(payload)
+    stamped.setdefault("server_time", datetime.now(timezone.utc).isoformat())
+    return stamped
+
+
 class ConnectionManager:
     """
     Manages WebSocket connections grouped by fixture_id.
     Each active match has its own 'room' of subscribers.
+
+    Rooms are process-local. Keep Render at a single instance until a shared
+    pub/sub backend (for example Redis) is introduced.
     """
 
     def __init__(self) -> None:
@@ -41,7 +52,7 @@ class ConnectionManager:
             return
 
         try:
-            message = json.dumps(payload, default=_json_default)
+            message = json.dumps(stamp_payload(payload), default=_json_default)
         except Exception:
             return
 

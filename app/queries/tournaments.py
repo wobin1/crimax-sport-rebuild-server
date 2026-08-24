@@ -1,10 +1,19 @@
 import asyncpg
+import json
 from datetime import date as _Date
 from typing import Optional
 
 
 def _parse_date(v) -> _Date | None:
     return _Date.fromisoformat(v) if v else None
+
+
+def _tournament_dict(row) -> dict:
+    result = dict(row)
+    ruleset = result.get("ruleset")
+    if isinstance(ruleset, str):
+        result["ruleset"] = json.loads(ruleset)
+    return result
 
 
 async def get_all_tournaments(
@@ -18,7 +27,7 @@ async def get_all_tournaments(
         SELECT
             t.id::text, t.name, t.season, t.description,
             t.start_date::text, t.end_date::text, t.status,
-            t.logo_url, t.is_current,
+            t.logo_url, t.is_current, t.ruleset,
             t.created_at::text, t.updated_at::text,
             COUNT(tc.club_id) AS club_count
         FROM tournaments t
@@ -30,7 +39,7 @@ async def get_all_tournaments(
         limit,
         offset,
     )
-    return [dict(r) for r in rows], int(total or 0)
+    return [_tournament_dict(r) for r in rows], int(total or 0)
 
 
 async def get_tournament_by_id(conn: asyncpg.Connection, tournament_id: str) -> Optional[dict]:
@@ -39,7 +48,7 @@ async def get_tournament_by_id(conn: asyncpg.Connection, tournament_id: str) -> 
         SELECT
             t.id::text, t.name, t.season, t.description,
             t.start_date::text, t.end_date::text, t.status,
-            t.logo_url, t.is_current,
+            t.logo_url, t.is_current, t.ruleset,
             t.created_at::text, t.updated_at::text,
             COUNT(tc.club_id) AS club_count
         FROM tournaments t
@@ -49,7 +58,7 @@ async def get_tournament_by_id(conn: asyncpg.Connection, tournament_id: str) -> 
         """,
         tournament_id,
     )
-    return dict(row) if row else None
+    return _tournament_dict(row) if row else None
 
 
 async def get_current_tournament(conn: asyncpg.Connection) -> Optional[dict]:
@@ -58,7 +67,7 @@ async def get_current_tournament(conn: asyncpg.Connection) -> Optional[dict]:
         SELECT
             t.id::text, t.name, t.season, t.description,
             t.start_date::text, t.end_date::text, t.status,
-            t.logo_url, t.is_current,
+            t.logo_url, t.is_current, t.ruleset,
             t.created_at::text, t.updated_at::text,
             COUNT(tc.club_id) AS club_count
         FROM tournaments t
@@ -68,17 +77,17 @@ async def get_current_tournament(conn: asyncpg.Connection) -> Optional[dict]:
         LIMIT 1
         """
     )
-    return dict(row) if row else None
+    return _tournament_dict(row) if row else None
 
 
 async def create_tournament(conn: asyncpg.Connection, data: dict) -> dict:
     row = await conn.fetchrow(
         """
-        INSERT INTO tournaments (name, season, description, start_date, end_date, logo_url)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO tournaments (name, season, description, start_date, end_date, logo_url, ruleset)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
         RETURNING id::text, name, season, description,
                   start_date::text, end_date::text, status,
-                  logo_url, is_current, created_at::text, updated_at::text
+                  logo_url, is_current, ruleset, created_at::text, updated_at::text
         """,
         data["name"],
         data["season"],
@@ -86,8 +95,9 @@ async def create_tournament(conn: asyncpg.Connection, data: dict) -> dict:
         _parse_date(data.get("start_date")),
         _parse_date(data.get("end_date")),
         data.get("logo_url"),
+        json.dumps(data.get("ruleset") or {"preset": "grassroots"}),
     )
-    result = dict(row)
+    result = _tournament_dict(row)
     result["club_count"] = 0
     return result
 
@@ -102,10 +112,14 @@ async def update_tournament(conn: asyncpg.Connection, tournament_id: str, data: 
         await conn.execute("UPDATE tournaments SET is_current = FALSE")
 
     set_clauses = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields))
-    values = [
-        _parse_date(v) if k in ("start_date", "end_date") else v
-        for k, v in fields.items()
-    ]
+    values = []
+    for key, value in fields.items():
+        if key in ("start_date", "end_date"):
+            values.append(_parse_date(value))
+        elif key == "ruleset":
+            values.append(json.dumps(value))
+        else:
+            values.append(value)
 
     await conn.execute(
         f"UPDATE tournaments SET {set_clauses} WHERE id = $1",

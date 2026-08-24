@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
 
+from app.core.rulesets import MatchRuleset
+
 
 class FixtureStatus(str, Enum):
     scheduled = "scheduled"
@@ -43,14 +45,15 @@ class FixtureUpdate(BaseModel):
     venue: Optional[str] = None
     round: Optional[str] = None
     status: Optional[FixtureStatus] = None
-    home_score: Optional[int] = None
-    away_score: Optional[int] = None
 
 
 class ClockUpdate(BaseModel):
     action: ClockAction
     minute: Optional[int] = Field(None, ge=0, le=130)
     stoppage_minutes: Optional[int] = Field(None, ge=0, le=30)
+    acknowledged_warnings: list[str] = Field(default_factory=list, max_length=10)
+    override: bool = False
+    override_reason: Optional[str] = Field(None, max_length=500)
 
 
 class ClubSummary(BaseModel):
@@ -87,6 +90,7 @@ class FixtureOut(BaseModel):
     stoppage_minutes: Optional[int] = None
     clock_minute: Optional[int] = None
     clock_label: Optional[str] = None
+    ruleset_snapshot: Optional[MatchRuleset] = None
     goal_scorers: dict[str, list[GoalScorerOut]] = Field(
         default_factory=lambda: {"home": [], "away": []}
     )

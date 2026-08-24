@@ -1,4 +1,5 @@
 import asyncpg
+import json
 from datetime import date as _Date, time as _Time, datetime, timezone
 from typing import Optional
 
@@ -29,6 +30,15 @@ def _iso(v) -> Optional[str]:
     return str(v)
 
 
+async def lock_fixture(conn: asyncpg.Connection, fixture_id: str) -> bool:
+    """Serialize all state-changing operations for one fixture."""
+    row = await conn.fetchrow(
+        "SELECT id FROM fixtures WHERE id = $1 FOR UPDATE",
+        fixture_id,
+    )
+    return row is not None
+
+
 _FIXTURE_SELECT = """
     SELECT
         f.id::text,
@@ -53,6 +63,7 @@ _FIXTURE_SELECT = """
         f.period_started_at,
         f.period_base_minute,
         f.stoppage_minutes,
+        f.ruleset_snapshot,
         f.created_at::text,
         f.updated_at::text
     FROM fixtures f
@@ -64,6 +75,9 @@ _FIXTURE_SELECT = """
 
 def _build_fixture_out(row: asyncpg.Record, scorers: Optional[dict] = None) -> dict:
     r = dict(row)
+    ruleset_snapshot = r.get("ruleset_snapshot")
+    if isinstance(ruleset_snapshot, str):
+        ruleset_snapshot = json.loads(ruleset_snapshot)
     out = {
         "id": r["id"],
         "tournament_id": r["tournament_id"],
@@ -91,11 +105,40 @@ def _build_fixture_out(row: asyncpg.Record, scorers: Optional[dict] = None) -> d
         "period_started_at": _iso(r.get("period_started_at")),
         "period_base_minute": int(r.get("period_base_minute") or 0),
         "stoppage_minutes": r.get("stoppage_minutes"),
+        "ruleset_snapshot": ruleset_snapshot,
         "goal_scorers": scorers or {"home": [], "away": []},
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
     }
     return enrich_clock_fields(out)
+
+
+async def get_effective_ruleset(
+    conn: asyncpg.Connection, fixture_id: str
+) -> dict | str | None:
+    return await conn.fetchval(
+        """
+        SELECT COALESCE(f.ruleset_snapshot, t.ruleset)
+        FROM fixtures f
+        JOIN tournaments t ON t.id = f.tournament_id
+        WHERE f.id = $1
+        """,
+        fixture_id,
+    )
+
+
+async def snapshot_ruleset(
+    conn: asyncpg.Connection, fixture_id: str, ruleset: dict
+) -> None:
+    await conn.execute(
+        """
+        UPDATE fixtures
+        SET ruleset_snapshot = $2::jsonb, updated_at = NOW()
+        WHERE id = $1 AND ruleset_snapshot IS NULL
+        """,
+        fixture_id,
+        json.dumps(ruleset),
+    )
 
 
 async def _goal_scorers_for_fixtures(
@@ -289,7 +332,8 @@ async def update_fixture(conn: asyncpg.Connection, fixture_id: str, data: dict) 
     for k, v in {**fields, **null_fields}.items():
         values.append(
             _parse_date(v) if k == "match_date" else
-            _parse_time(v) if k == "match_time" else v
+            _parse_time(v) if k == "match_time" else
+            json.dumps(v) if k == "ruleset_snapshot" else v
         )
         set_parts.append(f"{k} = ${len(values) + 1}")
 

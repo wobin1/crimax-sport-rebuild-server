@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS tournaments (
                 CHECK (status IN ('upcoming', 'active', 'completed')),
     logo_url    TEXT,
     is_current  BOOLEAN      NOT NULL DEFAULT FALSE,
+    ruleset     JSONB        NOT NULL DEFAULT '{"preset":"grassroots"}'::jsonb,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -153,6 +154,7 @@ CREATE TABLE IF NOT EXISTS fixtures (
     period_started_at   TIMESTAMPTZ,
     period_base_minute  SMALLINT     NOT NULL DEFAULT 0,
     stoppage_minutes    SMALLINT,
+    ruleset_snapshot    JSONB,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     CONSTRAINT no_self_match CHECK (home_club_id != away_club_id)
@@ -166,7 +168,10 @@ CREATE TABLE IF NOT EXISTS fixtures (
 CREATE TABLE IF NOT EXISTS match_events (
     id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     fixture_id        UUID        NOT NULL REFERENCES fixtures(id) ON DELETE CASCADE,
+    client_event_id   VARCHAR(64),
+    source_event_id   UUID        REFERENCES match_events(id) ON DELETE CASCADE,
     player_id         UUID        REFERENCES players(id) ON DELETE SET NULL,
+    assist_player_id  UUID        REFERENCES players(id) ON DELETE SET NULL,
     club_id           UUID        REFERENCES clubs(id)   ON DELETE SET NULL,
     event_type        VARCHAR(30)  NOT NULL
                       CHECK (event_type IN (
@@ -180,6 +185,41 @@ CREATE TABLE IF NOT EXISTS match_events (
     description       TEXT,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_match_events_client_event
+    ON match_events (fixture_id, client_event_id)
+    WHERE client_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_match_events_source
+    ON match_events (source_event_id);
+
+
+-- =============================================================================
+-- AUDIT LOG  (append-only operational history)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id             UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_user_id  UUID         REFERENCES users(id) ON DELETE SET NULL,
+    actor_role     VARCHAR(20),
+    action         VARCHAR(50)  NOT NULL,
+    entity_type    VARCHAR(30)  NOT NULL,
+    entity_id      UUID,
+    fixture_id     UUID         REFERENCES fixtures(id) ON DELETE SET NULL,
+    club_id        UUID         REFERENCES clubs(id) ON DELETE SET NULL,
+    before_data    JSONB,
+    after_data     JSONB,
+    reason         TEXT,
+    ruleset        JSONB,
+    request_id     TEXT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_fixture_created
+    ON audit_log (fixture_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_actor_created
+    ON audit_log (actor_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_entity
+    ON audit_log (entity_type, entity_id);
 
 
 -- =============================================================================
@@ -232,6 +272,67 @@ CREATE TABLE IF NOT EXISTS news (
 
 
 -- =============================================================================
+-- EXTERNAL IDS  (provider identity map; internal UUIDs stay primary)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS external_ids (
+    id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_type  VARCHAR(30)  NOT NULL
+                   CHECK (entity_type IN (
+                       'club', 'player', 'fixture', 'tournament', 'user'
+                   )),
+    entity_id    UUID         NOT NULL,
+    provider     VARCHAR(50)  NOT NULL,
+    external_id  VARCHAR(255) NOT NULL,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (provider, entity_type, external_id),
+    UNIQUE (provider, entity_type, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_ids_entity
+    ON external_ids (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_external_ids_lookup
+    ON external_ids (provider, entity_type, external_id);
+
+
+-- =============================================================================
+-- REFRESH TOKENS  (rotation / revocation store)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash   VARCHAR(64)  NOT NULL UNIQUE,
+    expires_at   TIMESTAMPTZ  NOT NULL,
+    revoked_at   TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
+    ON refresh_tokens (user_id)
+    WHERE revoked_at IS NULL;
+
+
+-- =============================================================================
+-- AUTH TOKENS  (password reset)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    purpose     VARCHAR(32)  NOT NULL,
+    token_hash  VARCHAR(64)  NOT NULL,
+    expires_at  TIMESTAMPTZ  NOT NULL,
+    used_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_tokens_hash ON auth_tokens (token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_purpose ON auth_tokens (user_id, purpose);
+
+
+-- =============================================================================
 -- INDEXES
 -- =============================================================================
 
@@ -245,6 +346,7 @@ CREATE INDEX IF NOT EXISTS idx_fixtures_round        ON fixtures(round);
 
 CREATE INDEX IF NOT EXISTS idx_events_fixture        ON match_events(fixture_id);
 CREATE INDEX IF NOT EXISTS idx_events_type           ON match_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_assist         ON match_events(assist_player_id);
 
 CREATE INDEX IF NOT EXISTS idx_news_published        ON news(is_published, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_news_slug             ON news(slug);

@@ -1,6 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
+
+from app.core.rulesets import RulesetConfig
 
 
 class TournamentStatus(str, Enum):
@@ -16,6 +18,7 @@ class TournamentCreate(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     logo_url: Optional[str] = None
+    ruleset: RulesetConfig = Field(default_factory=RulesetConfig)
 
 
 class TournamentUpdate(BaseModel):
@@ -27,6 +30,7 @@ class TournamentUpdate(BaseModel):
     status: Optional[TournamentStatus] = None
     logo_url: Optional[str] = None
     is_current: Optional[bool] = None
+    ruleset: Optional[RulesetConfig] = None
 
 
 class TournamentOut(BaseModel):
@@ -39,6 +43,7 @@ class TournamentOut(BaseModel):
     status: str
     logo_url: Optional[str]
     is_current: bool
+    ruleset: RulesetConfig
     club_count: int
     created_at: str
     updated_at: str

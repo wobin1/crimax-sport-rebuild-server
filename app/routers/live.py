@@ -1,6 +1,8 @@
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.core.websocket import manager
+from app.core.websocket import manager, stamp_payload
 from app.database.pool import get_pool
 from app.queries import events as eq
 from app.queries import fixtures as fq
@@ -25,15 +27,21 @@ async def live_fixture(websocket: WebSocket, fixture_id: str):
     await manager.connect(websocket, fixture_id)
     try:
         await websocket.send_json(
-            {
-                "type": "init",
-                "fixture": fixture,
-                "events": events,
-            }
+            stamp_payload(
+                {
+                    "type": "init",
+                    "fixture": fixture,
+                    "events": events,
+                }
+            )
         )
         # Keep the socket open; clients may send pings as keep-alives.
+        # Server also emits a light heartbeat so proxies detect dead peers.
         while True:
-            await websocket.receive_text()
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                await websocket.send_json(stamp_payload({"type": "heartbeat"}))
     except WebSocketDisconnect:
         manager.disconnect(websocket, fixture_id)
     except Exception:

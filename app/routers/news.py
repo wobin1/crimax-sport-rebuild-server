@@ -4,12 +4,21 @@ import asyncpg
 from app.core.dependencies import require_super_admin
 from app.core.exceptions import NotFoundError
 from app.core.pagination import PaginationParams, get_pagination
+from app.core.sanitize import sanitize_html
 from app.database.pool import get_conn
 from app.queries import news as q
 from app.schemas.news import NewsCreate, NewsOut, NewsUpdate
 from app.schemas.pagination import Paginated, paginated
 
 router = APIRouter(prefix="/news", tags=["news"])
+
+
+def _sanitize_news_payload(data: dict) -> dict:
+    if "content" in data and data["content"] is not None:
+        data["content"] = sanitize_html(data["content"]) or ""
+    if "excerpt" in data:
+        data["excerpt"] = sanitize_html(data["excerpt"])
+    return data
 
 
 @router.get("", response_model=Paginated[NewsOut])
@@ -67,7 +76,11 @@ async def create_article(
     conn: asyncpg.Connection = Depends(get_conn),
     current_user: dict = Depends(require_super_admin),
 ):
-    return await q.create_news(conn, payload.model_dump(), author_id=current_user["id"])
+    return await q.create_news(
+        conn,
+        _sanitize_news_payload(payload.model_dump()),
+        author_id=current_user["id"],
+    )
 
 
 @router.patch("/{news_id}", response_model=NewsOut)
@@ -77,7 +90,11 @@ async def update_article(
     conn: asyncpg.Connection = Depends(get_conn),
     _: dict = Depends(require_super_admin),
 ):
-    article = await q.update_news(conn, news_id, payload.model_dump(exclude_none=True))
+    article = await q.update_news(
+        conn,
+        news_id,
+        _sanitize_news_payload(payload.model_dump(exclude_none=True)),
+    )
     if not article:
         raise NotFoundError("Article")
     return article

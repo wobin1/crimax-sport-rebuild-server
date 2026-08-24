@@ -110,20 +110,13 @@ async def create_invite(
         invited_by=str(current_user["id"]),
     )
 
-    email_sent = False
-    try:
-        await send_invite_email(
-            to=invite["email"],
-            full_name=invite["full_name"],
-            invite_url=invite["invite_url"],
-            role=invite["role"],
-        )
-        email_sent = True
-    except Exception:
-        # Invite is still valid — UI can copy the link
-        email_sent = False
-
-    invite["email_sent"] = email_sent
+    # Invite is still valid when send fails — UI can copy the link.
+    invite["email_sent"] = await send_invite_email(
+        to=invite["email"],
+        full_name=invite["full_name"],
+        invite_url=invite["invite_url"],
+        role=invite["role"],
+    )
     return invite
 
 
@@ -165,19 +158,12 @@ async def resend_invite(
         raise NotFoundError("Invite")
     invite, _token = rotated
 
-    email_sent = False
-    try:
-        await send_invite_email(
-            to=invite["email"],
-            full_name=invite["full_name"],
-            invite_url=invite["invite_url"],
-            role=invite["role"],
-        )
-        email_sent = True
-    except Exception:
-        email_sent = False
-
-    invite["email_sent"] = email_sent
+    invite["email_sent"] = await send_invite_email(
+        to=invite["email"],
+        full_name=invite["full_name"],
+        invite_url=invite["invite_url"],
+        role=invite["role"],
+    )
     return invite
 
 

@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 import asyncpg
 
+from app.core.rulesets import store_ruleset
 from app.core.dependencies import require_super_admin
 from app.core.exceptions import NotFoundError
 from app.core.pagination import PaginationParams, get_pagination
 from app.database.pool import get_conn
+from app.queries import audit as aq
 from app.queries import tournaments as q
 from app.schemas.clubs import ClubOut
 from app.schemas.pagination import Paginated, paginated
@@ -49,9 +51,23 @@ async def get_tournament(tournament_id: str, conn: asyncpg.Connection = Depends(
 async def create_tournament(
     payload: TournamentCreate,
     conn: asyncpg.Connection = Depends(get_conn),
-    _: dict = Depends(require_super_admin),
+    current_user: dict = Depends(require_super_admin),
+    request_id: str | None = Header(None, alias="X-Request-ID"),
 ):
-    return await q.create_tournament(conn, payload.model_dump())
+    data = payload.model_dump(mode="json")
+    data["ruleset"] = store_ruleset(data.get("ruleset"))
+    async with conn.transaction():
+        tournament = await q.create_tournament(conn, data)
+        await aq.record(
+            conn,
+            actor=current_user,
+            action="tournament.create",
+            entity_type="tournament",
+            entity_id=tournament["id"],
+            after_data=tournament,
+            request_id=request_id,
+        )
+    return tournament
 
 
 @router.patch("/{tournament_id}", response_model=TournamentOut)
@@ -59,11 +75,27 @@ async def update_tournament(
     tournament_id: str,
     payload: TournamentUpdate,
     conn: asyncpg.Connection = Depends(get_conn),
-    _: dict = Depends(require_super_admin),
+    current_user: dict = Depends(require_super_admin),
+    request_id: str | None = Header(None, alias="X-Request-ID"),
 ):
-    tournament = await q.update_tournament(conn, tournament_id, payload.model_dump(exclude_none=True))
-    if not tournament:
-        raise NotFoundError("Tournament")
+    data = payload.model_dump(mode="json", exclude_none=True)
+    if "ruleset" in data:
+        data["ruleset"] = store_ruleset(data["ruleset"])
+    async with conn.transaction():
+        before = await q.get_tournament_by_id(conn, tournament_id)
+        if not before:
+            raise NotFoundError("Tournament")
+        tournament = await q.update_tournament(conn, tournament_id, data)
+        await aq.record(
+            conn,
+            actor=current_user,
+            action="tournament.update",
+            entity_type="tournament",
+            entity_id=tournament_id,
+            before_data=before,
+            after_data=tournament,
+            request_id=request_id,
+        )
     return tournament
 
 

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
 
@@ -16,17 +16,23 @@ class EventType(str, Enum):
 
 class EventCreate(BaseModel):
     fixture_id: str
+    client_event_id: Optional[str] = Field(None, min_length=1, max_length=64)
     player_id: Optional[str] = None
     club_id: str
     event_type: EventType
-    minute: int
-    extra_time_minute: Optional[int] = None
-    description: Optional[str] = None
+    minute: int = Field(ge=0, le=130)
+    extra_time_minute: Optional[int] = Field(None, ge=0, le=30)
+    description: Optional[str] = Field(None, max_length=1000)
+    acknowledged_warnings: list[str] = Field(default_factory=list, max_length=10)
+    override: bool = False
+    override_reason: Optional[str] = Field(None, max_length=500)
 
 
 class EventOut(BaseModel):
     id: str
     fixture_id: str
+    client_event_id: Optional[str] = None
+    source_event_id: Optional[str] = None
     player_id: Optional[str] = None
     player_name: Optional[str] = None
     club_id: Optional[str] = None

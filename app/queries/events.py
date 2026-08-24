@@ -20,6 +20,8 @@ async def get_fixture_events(
         SELECT
             e.id::text,
             e.fixture_id::text,
+            e.client_event_id,
+            e.source_event_id::text,
             e.player_id::text,
             p.full_name   AS player_name,
             e.club_id::text,
@@ -43,18 +45,23 @@ async def get_fixture_events(
     return [dict(r) for r in rows], int(total or 0)
 
 
-async def create_event(conn: asyncpg.Connection, data: dict) -> dict:
+async def create_event(conn: asyncpg.Connection, data: dict) -> Optional[dict]:
     row = await conn.fetchrow(
         """
         WITH inserted AS (
             INSERT INTO match_events
-                (fixture_id, player_id, club_id, event_type, minute, extra_time_minute, description)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (fixture_id, client_event_id, source_event_id, player_id, club_id, event_type, minute, extra_time_minute, description)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (fixture_id, client_event_id)
+                WHERE client_event_id IS NOT NULL
+                DO NOTHING
             RETURNING *
         )
         SELECT
             e.id::text,
             e.fixture_id::text,
+            e.client_event_id,
+            e.source_event_id::text,
             e.player_id::text,
             p.full_name AS player_name,
             e.club_id::text,
@@ -69,6 +76,8 @@ async def create_event(conn: asyncpg.Connection, data: dict) -> dict:
         LEFT JOIN clubs   c ON c.id = e.club_id
         """,
         data["fixture_id"],
+        data.get("client_event_id"),
+        data.get("source_event_id"),
         data.get("player_id"),
         data.get("club_id"),
         data["event_type"],
@@ -76,7 +85,51 @@ async def create_event(conn: asyncpg.Connection, data: dict) -> dict:
         data.get("extra_time_minute"),
         data.get("description"),
     )
-    return dict(row)
+    return dict(row) if row else None
+
+
+async def get_event_by_client_id(
+    conn: asyncpg.Connection,
+    fixture_id: str,
+    client_event_id: str,
+) -> Optional[dict]:
+    row = await conn.fetchrow(
+        """
+        SELECT
+            e.id::text,
+            e.fixture_id::text,
+            e.client_event_id,
+            e.source_event_id::text,
+            e.player_id::text,
+            p.full_name AS player_name,
+            e.club_id::text,
+            c.name AS club_name,
+            e.event_type::text AS event_type,
+            e.minute,
+            e.extra_time_minute,
+            e.description,
+            e.created_at::text
+        FROM match_events e
+        LEFT JOIN players p ON p.id = e.player_id
+        LEFT JOIN clubs c ON c.id = e.club_id
+        WHERE e.fixture_id = $1 AND e.client_event_id = $2
+        """,
+        fixture_id,
+        client_event_id,
+    )
+    return dict(row) if row else None
+
+
+async def player_belongs_to_club(
+    conn: asyncpg.Connection, player_id: str, club_id: str
+) -> bool:
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM players WHERE id = $1 AND club_id = $2)",
+            player_id,
+            club_id,
+        )
+    )
 
 
 async def delete_event(conn: asyncpg.Connection, event_id: str) -> bool:
