@@ -16,7 +16,26 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SQL_DIR = os.path.join(BACKEND_DIR, "sql")
+
+
+def sql_dir() -> str:
+    """Locate sql/ whether the app runs from source or an installed package."""
+    env = os.environ.get("SQL_MIGRATIONS_DIR")
+    if env:
+        return env
+    candidates = [
+        os.path.join(os.getcwd(), "sql"),
+        os.path.join(BACKEND_DIR, "sql"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations"),
+    ]
+    for path in candidates:
+        path = os.path.normpath(path)
+        if os.path.isdir(path) and os.path.isfile(os.path.join(path, "schema.sql")):
+            return path
+    raise RuntimeError(
+        "SQL migrations directory not found. Looked in: " + ", ".join(candidates)
+    )
+
 
 BASELINE_VERSION = "000"
 BASELINE_FILENAME = "schema.sql"
@@ -38,7 +57,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 def discover_migrations() -> list[tuple[str, str]]:
     """Return (version, filename) in apply order, baseline schema first."""
     numbered: dict[str, str] = {}
-    for filename in os.listdir(SQL_DIR):
+    for filename in os.listdir(sql_dir()):
         match = MIGRATION_FILENAME.match(filename)
         if not match:
             continue
@@ -57,7 +76,7 @@ def discover_migrations() -> list[tuple[str, str]]:
 
 
 def _read(filename: str) -> tuple[str, str]:
-    with open(os.path.join(SQL_DIR, filename), "r") as f:
+    with open(os.path.join(sql_dir(), filename), "r") as f:
         sql = f.read()
     return sql, hashlib.sha256(sql.encode()).hexdigest()
 

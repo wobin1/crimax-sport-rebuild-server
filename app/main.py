@@ -34,9 +34,17 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_pool()
-    if get_settings().auto_migrate:
-        await run_migrations(get_pool())
+    log = logging.getLogger("crimax.api")
+    try:
+        await init_pool()
+        if get_settings().auto_migrate:
+            await run_migrations(get_pool())
+    except Exception:
+        log.exception(
+            "startup_failed — check DATABASE_URL, SECRET_KEY, and that "
+            "Postgres is reachable with SSL from FastAPI Cloud"
+        )
+        raise
     yield
     await close_pool()
 
@@ -165,6 +173,7 @@ _register_routers(app, prefix="/v1")
 _register_routers(app)
 
 
+@app.get("/", include_in_schema=False)
 @app.get("/health", tags=["health"])
 @app.get("/v1/health", tags=["health"])
 async def health():
